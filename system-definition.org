@@ -1,0 +1,66 @@
+#+name: license-preamble
+#+begin_src lisp :exports none 
+;;;; Library for creating shell completions from clon specifications.
+;;;; Copyright (C) 2018 Pieter Hijma
+
+;;;; This program is free software: you can redistribute it and/or modify
+;;;; it under the terms of the GNU General Public License as published by
+;;;; the Free Software Foundation, either version 3 of the License, or
+;;;; (at your option) any later version.
+
+;;;; This program is distributed in the hope that it will be useful,
+;;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;;;; GNU General Public License for more details.
+
+;;;; You should have received a copy of the GNU General Public License
+;;;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#+end_src
+
+#+property: header-args :comments link :tangle-mode (identity #o400) :results output silent :mkdirp yes
+
+* System definition
+
+** The system
+
+#+begin_src lisp :tangle "system/clon-completion.asd" :noweb yes
+<<license-preamble>>
+
+(in-package :cl-user)
+
+(defpackage :clon-completion-asd
+  (:use :cl :asdf))
+
+(in-package :clon-completion-asd)
+
+(defsystem :clon-completion
+    :depends-on (:alexandria :anaphora :net.didierverna.clon :code-emitter)
+    :components ((:file "package")
+                 (:file "clon-completion" :depends-on ("package"))))
+#+end_src
+
+** The package
+   :PROPERTIES:
+   :header-args+: :package "cl-user"
+   :header-args+: :tangle "system/package.lisp"
+   :END:
+
+#+begin_src lisp :exports none :noweb yes
+<<license-preamble>>
+
+(in-package :cl-user)
+#+end_src
+
+#+begin_src lisp
+(eval-when (:execute :load-toplevel :compile-toplevel)
+  (net.didierverna.clon:nickname-package))
+
+(defpackage :clon-completion
+  (:use :cl :clon :code-emitter)
+  (:import-from :alexandria :appendf :flatten)
+  (:import-from :anaphora :awhen :it)
+  (:export :defcommand :def-main-synopsis
+           :def-main-completions :def-command-completions
+           :def-command-func :dispatch
+           :exit-with :write-completion-file))
+#+end_src

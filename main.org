@@ -1,0 +1,360 @@
+#+name: license-preamble
+#+begin_src lisp :exports none 
+;;;; Library for creating shell completions from clon specifications.
+;;;; Copyright (C) 2018 Pieter Hijma
+
+;;;; This program is free software: you can redistribute it and/or modify
+;;;; it under the terms of the GNU General Public License as published by
+;;;; the Free Software Foundation, either version 3 of the License, or
+;;;; (at your option) any later version.
+
+;;;; This program is distributed in the hope that it will be useful,
+;;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;;;; GNU General Public License for more details.
+
+;;;; You should have received a copy of the GNU General Public License
+;;;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#+end_src
+
+#+property: header-args :comments link :tangle-mode (identity #o400) :results output silent :mkdirp yes
+
+#+title: Completion for Clon
+
+ # tangling
+#+begin_src emacs-lisp :results output silent :exports none
+(async-start
+ (lambda ()
+   (require 'org)
+   (require 'ob)
+   (require 'ob-tangle)
+   (let ((files '("main.org" "system-definition.org" "bash-functions.org")))
+     (mapc (lambda (file)
+	     (find-file file)
+	     (let ((result (org-babel-tangle)))
+	       (kill-buffer)
+	       result))
+	   files)))
+ (lambda (result)
+   (message "Done with tangling %s." (mapconcat 'identity result " "))))
+(princ "Busy with tangling")
+#+end_src
+
+
+ # exporting to HTML
+#+begin_src emacs-lisp :results output silent :exports none
+(defun export ()
+  (require 'package)
+  (package-initialize)
+  (require 'org)
+  (require 'ob)
+  (require 'htmlize)
+  (find-file "main.org")
+  (org-html-export-as-html)
+  (unless (file-exists-p "html")
+    (mkdir "html"))
+  (write-file "html/index.html")
+  (kill-buffer))
+
+(defun msg-me (process event)
+  (when (equal event "finished\n")
+    (message "Exporting to HTML done")
+    (kill-buffer "*html-export*")))
+
+(progn
+  (set-process-sentinel
+   (start-process-shell-command
+    "html-export" "*html-export*"
+    (format "TERM=xterm-256color;emacs -Q -nw --eval '(progn (funcall %S) (kill-emacs))';exit"
+            (symbol-function 'export))) 'msg-me)
+  (princ "Busy exporting to HTML"))
+#+end_src
+
+
+* Introduction
+
+This document describes the functions and macros to automatically create shell
+completion from Clon specifications.  It is necessary to define the environment
+variable ~CLON_COMPLETION_DIR~ to make sure that the function that writes the
+completion specification can find a library of bash functions needed to perform
+the completion.  This document automatically creates completions files for
+command-style programs, such as ~svn~ or ~git~.  The software is licensed under
+GPL version 3, see Sec. [[copying]]
+
+# #+include: system-definition.org :minlevel 1
+
+* Completion for Clon
+  :PROPERTIES:
+  :header-args+: :package ":clon-completion"
+  :header-args+: :tangle "system/clon-completion.lisp"
+  :END:
+
+First we define some constants.  The variable ~*commands*~ will contain the
+commands that will be defined.
+
+#+begin_src lisp :exports none :noweb yes
+<<license-preamble>>
+
+(in-package :clon-completion)
+#+end_src
+
+#+begin_src lisp
+(defvar *commands* nil)
+(defparameter *completion-dir* (merge-pathnames ".bash_completion.d/" 
+                                                (user-homedir-pathname)))
+
+(defparameter *main-completions* nil)
+(defparameter *completions* nil)
+#+end_src
+
+** Exported macro's and functions
+
+With the macro's below we can define the synopses of commands and the main
+synopsis:
+
+#+begin_src lisp
+(defmacro defcommand (command synopsis)
+  (let ((symbol (command-to-synopsis-symbol command)))
+    (pushnew command *commands* :test #'string=)
+    `(progn
+       (pushnew ,command *commands* :test #'string=)
+       (defparameter ,symbol ,synopsis))))
+
+(defmacro def-main-synopsis (&body options)
+  `(clon:defsynopsis (:postfix "cmd [OPTIONS]")
+     (text :contents (format nil "Where 'cmd' is one of the following commands: ~{~a~^, ~}.~%~a"
+                             ,*commands*
+                             "Use 'cmd -h' to get command-specific help."))
+     ,@options))
+#+end_src
+
+The following macro's help defining completions for options:
+
+#+begin_src lisp
+(defun create-completions (completion-spec)
+  `(list ,@(loop for (option completion) in completion-spec
+                collect `(cons ,option ,completion))))
+
+(defmacro def-main-completions (&body completion-spec)
+  `(setf *main-completions* ,(create-completions completion-spec)))
+
+(defmacro def-command-completions (command &body completion-spec)
+  `(push (cons ,command ,(create-completions completion-spec)) *completions*))
+  
+#+end_src
+
+
+The following two macros define a function to process a command and code for
+dispatching on the commands respectively.
+
+#+begin_src lisp
+(defmacro def-command-func (command &body body)
+  `(defun ,(to-command-func-symbol command) ()
+     (clon:make-context
+            :synopsis ,(command-to-synopsis-symbol command)
+            :cmdline (clon:remainder))
+     ,@body))
+
+(defmacro dispatch ()
+  `(let ((command (first (clon:remainder))))
+     (cond ,@(loop for command in *commands* collect
+                 `((string= command ,command)
+                   (,(to-command-func-symbol command))))
+           (t
+            (exit-with "Unknown command")))))
+#+end_src
+
+The following function writes the completion file:
+
+#+begin_src lisp
+(defun get-completion-functions-file ()
+  (let ((clon-completion-dir (uiop:getenv "CLON_COMPLETION_DIR")))
+    (if clon-completion-dir
+        (merge-pathnames (format nil "~a/bash_functions/" clon-completion-dir)
+                         "completion_functions.bash")
+        (error "Environment variable CLON_COMPLETION_DIR not set"))))
+
+
+(defun write-completion-file (command)
+  (let* ((main-func-name (format nil "_~a" command))
+         (main-func (get-main-func main-func-name))
+         (funcs (get-funcs)))
+    (with-open-file (target-stream (merge-pathnames *completion-dir* command)
+                                   :direction :output :if-exists :supersede)
+        (format target-stream "#!/bin/bash~%~%")
+      (with-open-file (bash-funcs-stream (get-completion-functions-file))
+            (loop for line = (read-line bash-funcs-stream nil 'eof)
+               until (eq line 'eof)
+               do (format target-stream "~a~%" line)))
+        (format target-stream "~a~%"
+         (emit ""
+               "~a" (emit-list funcs
+                               :nr-lines 2 :function #'gen-completion-func)
+               ""
+               "~a" (gen-main-func main-func)
+               ""
+               "complete -F ~a ~a" main-func-name command)))))
+#+end_src
+
+The following function can be used to exit the program with an error and a
+message:
+
+#+begin_src lisp
+(defun exit-with (message)
+  (write-line message)
+  (clon:help)
+  (terpri)
+  (clon:exit 1))
+#+end_src
+
+
+
+** Generating the completion specification
+
+The following function generates the main function for the completion:
+
+#+begin_src lisp
+(defun gen-main-func (spec)
+  (destructuring-bind (&key func options commands) spec
+    (let ((options (to-space-separated-string options)))
+      (emit "~a() {" func
+            "    local commands=\"~a\"" (emit-list commands :separator " ")
+            "    local command=$(_first_previous \"$commands\")"
+            ""
+            "    ~a" (gen-switch (mapcar #'make-command-call commands)
+                                 "$command")
+            ""
+            "    ~a" (gen-specific-completions *main-completions*)
+            ""
+            "    local list=\"~a\"" options
+            "    local all_prev=$(_all_previous \"$list\")"
+            "    local unique=$(_get_unique \"$list\" \"$all_prev\")"
+            ""
+            "    COMPREPLY=($(compgen -W \"$unique\" -- $cur))"
+            "    return 0"
+            "}"))))
+
+(defun make-command-call (command)
+  (cons command (format nil "_~a" command)))
+#+end_src
+
+The following function generates a generic function for completion:
+
+#+begin_src lisp
+(defun gen-completion-func (spec)
+  (destructuring-bind (&key func options cases) spec
+    (let ((options (to-space-separated-string options)))
+      (emit "~a() {" func
+            "    local cur=${COMP_WORDS[COMP_CWORD]}"
+            "    local prev=${COMP_WORDS[COMP_CWORD-1]}"
+            ""
+            "    ~a" (if cases
+                         (gen-switch cases "$prev")
+                         "")
+            ""
+            "    COMPREPLY=($(compgen -W \"~a\" -- $cur))" options
+            "    return 0"
+            "}"))))
+
+#+end_src
+
+The following function generates specific completions:
+
+#+begin_src lisp
+(defun gen-specific-completions (completions)
+  (if completions
+      (emit "local cur=${COMP_WORDS[COMP_CWORD]}"
+            "local prev=${COMP_WORDS[COMP_CWORD-1]}"
+            ""
+            "~a" (gen-switch (mapcar #'make-completion completions) "$prev"))
+      ""))
+
+(defun make-completion (cons-form)
+  (cons (car cons-form)
+        (format nil "COMPREPLY=($(compgen -W \"~a\" -- $cur))" (cdr cons-form))))
+#+end_src
+
+The following functions generate a switch statement.
+
+#+begin_src lisp
+(defun gen-switch (cases variable)
+  (emit "case \"~a\" in" variable
+        "    ~a" (emit-list cases :function #'gen-case)
+        "esac"))
+
+(defun gen-case (case)
+  (emit "~a)" (car case)
+        "    ~a" (cdr case)
+        "    return 0"
+        "    ;;"))
+#+end_src
+
+
+** Utility functions
+
+#+begin_src lisp
+(defun to-space-separated-string (list)
+  (format nil "~{~a~^ ~}" list))
+
+(defun command-to-synopsis-symbol (command)
+  (intern (format nil "*~a-SYNOPSIS*" (string-upcase command)) :clon-completion))
+
+(defun to-command-func-symbol (command)
+  (intern (format nil "~a-OPTIONS" (string-upcase command))))
+
+(defun get-options-option (option)
+  (let ((options nil))
+    (awhen (clon::short-name option)
+      (push (format nil "-~a" it) options))
+    (awhen (clon::long-name option)
+      (push (format nil "--~a" it) options))
+    (nreverse options)))
+
+(defun get-options-synopsis (synopsis)
+  (flatten (mapcar #'get-options-option
+                   (remove-if (complement #'(lambda (x) (typep x 'clon::option)))
+                           (clon::items synopsis)))))
+
+(defun get-options-main ()
+  (let ((options nil))
+    (appendf options *commands*)
+    (appendf options (get-options-synopsis *synopsis*))
+    options))
+#+end_src
+
+
+
+#+begin_src lisp
+(defun get-funcs ()
+  (loop for command in *commands*
+     collect (list :func (format nil "_~a" command)
+                   :options (get-options-synopsis
+                             (symbol-value
+                              (command-to-synopsis-symbol command))))))
+
+(defun get-main-func (func-name)
+  (list :func func-name :options (get-options-main) :commands *commands*))
+#+end_src
+
+
+#+include: bash-functions.org :minlevel 1
+
+* Copying <<copying>>
+
+Library for creating shell completions from clon specifications.
+
+Copyright (C) 2018 Pieter Hijma
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see [[https://www.gnu.org/licenses/]].
+

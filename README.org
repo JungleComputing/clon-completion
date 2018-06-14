@@ -1,0 +1,15 @@
+#+title: Clon Completion
+
+* Introduction
+
+This package contains functionality to automatically create shell completion
+from Common Lisp [[https://www.lrde.epita.fr/%257Edidier/software/lisp/clon.php][Clon]] (Command-line Option Nuker) specifications for Bash.  It
+focuses mainly on command-style programs such as ~svn~ or ~git~. 
+
+* License
+
+The software is licensed under GPL version 3. 
+
+* Copyright
+
+Pieter Hijma 2018
